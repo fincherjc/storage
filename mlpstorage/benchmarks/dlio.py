@@ -59,12 +59,12 @@ class DLIOBenchmark(Benchmark, abc.ABC):
     def config_name(self, config_name):
         self._config_name = config_name
 
-    def process_dlio_params(self, config_file, accelerator_type=None):
+    def process_dlio_params(self, config_file, accelerator_type=None, workload_subdir="training"):
         # params_dict contains only user-provided command-line params
         params_dict = dict() if not self.args.params else {k: v for k, v in (item.split("=") for item in self.args.params)}
         
-        # Load base workload config
-        yaml_params = read_config_from_file(os.path.join(self.DLIO_CONFIG_PATH, "workload", config_file))
+        # Load base workload config from subdirectory
+        yaml_params = read_config_from_file(os.path.join(self.DLIO_CONFIG_PATH, "workload", workload_subdir, config_file))
         
         # Load and merge accelerator-specific overrides if accelerator_type is provided
         # Store accelerator overrides separately - they should NOT be exposed to users
@@ -127,7 +127,15 @@ class DLIOBenchmark(Benchmark, abc.ABC):
         self.logger.verboser(f'Generating DLIO command for benchmark {self.BENCHMARK_TYPE.value}')
         cmd = ""
         cmd = f"{self.base_command_path}"
-        cmd += f" workload={self.config_name}"
+        
+        # Use nested config groups based on benchmark type
+        if self.BENCHMARK_TYPE == BENCHMARK_TYPES.training:
+            cmd += f" workload/training={self.config_name}"
+        elif self.BENCHMARK_TYPE == BENCHMARK_TYPES.checkpointing:
+            cmd += f" workload/checkpointing={self.config_name}"
+        else:
+            # Fallback to old behavior for compatibility
+            cmd += f" workload={self.config_name}"
 
         # Run directory for Hydra to output log files
         cmd += f" ++hydra.run.dir={self.run_result_output}"
@@ -135,15 +143,18 @@ class DLIOBenchmark(Benchmark, abc.ABC):
 
         cmd = self.add_workflow_to_cmd(cmd)
 
+        # Determine workload path prefix for overrides based on benchmark type
+        workload_prefix = "workload/training" if self.BENCHMARK_TYPE == BENCHMARK_TYPES.training else "workload/checkpointing"
+
         # Add accelerator overrides first (hidden from users, loaded automatically)
         if hasattr(self, 'accelerator_overrides_dict') and self.accelerator_overrides_dict:
             for key, value in self.accelerator_overrides_dict.items():
-                cmd += f" ++workload.{key}={value}"
+                cmd += f" ++{workload_prefix}.{key}={value}"
 
         # Add user-provided params
         if self.params_dict:
             for key, value in self.params_dict.items():
-                cmd += f" ++workload.{key}={value}"
+                cmd += f" ++{workload_prefix}.{key}={value}"
 
         cmd += f" --config-dir={self.config_path}"
 
@@ -183,7 +194,7 @@ class TrainingBenchmark(DLIOBenchmark):
             accelerator_type = args.accelerator_type
 
         self.params_dict, self.yaml_params, self.combined_params = self.process_dlio_params(
-            self.config_file, accelerator_type=accelerator_type
+            self.config_file, accelerator_type=accelerator_type, workload_subdir="training"
         )
 
         if self.args.command not in ("datagen", "datasize"):
@@ -297,7 +308,9 @@ class CheckpointingBenchmark(DLIOBenchmark):
 
         self.config_name = f'{args.model.replace("-", "_")}'
         self.config_file = f'{self.config_name}.yaml'
-        self.params_dict, self.yaml_params, self.combined_params = self.process_dlio_params(self.config_file)
+        self.params_dict, self.yaml_params, self.combined_params = self.process_dlio_params(
+            self.config_file, workload_subdir="checkpointing"
+        )
         self.verify_benchmark()
         self.add_checkpoint_params()
         self.logger.status(f'Instantiated the Checkpointing Benchmark...')
