@@ -1,0 +1,6 @@
+train:
+  computation_time: 0.636
+
+reader:
+  dont_use_mmap: True  # Used by resnet50, harmless for other workloads
+

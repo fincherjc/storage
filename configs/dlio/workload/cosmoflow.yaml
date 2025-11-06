@@ -25,7 +25,8 @@ reader:
 
 train: 
   epochs: 5
-  computation_time: 0.00551
+  # computation_time will come from accelerator config
 
 metric:
  au: 0.70
+

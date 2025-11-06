@@ -28,7 +28,7 @@ reader:
 
 train:
   epochs: 5
-  computation_time: 0.323
+  # computation_time will come from accelerator config
 
 checkpoint:
   checkpoint_folder: checkpoints/unet3d
@@ -37,3 +37,4 @@ checkpoint:
 
 metric:
   au: 0.90
+

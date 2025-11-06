@@ -59,9 +59,30 @@ class DLIOBenchmark(Benchmark, abc.ABC):
     def config_name(self, config_name):
         self._config_name = config_name
 
-    def process_dlio_params(self, config_file):
+    def process_dlio_params(self, config_file, accelerator_type=None):
+        # params_dict contains only user-provided command-line params
         params_dict = dict() if not self.args.params else {k: v for k, v in (item.split("=") for item in self.args.params)}
+        
+        # Load base workload config
         yaml_params = read_config_from_file(os.path.join(self.DLIO_CONFIG_PATH, "workload", config_file))
+        
+        # Load and merge accelerator-specific overrides if accelerator_type is provided
+        # Store accelerator overrides separately - they should NOT be exposed to users
+        accelerator_overrides_dict = {}
+        if accelerator_type and self.args.command != "datagen":
+            accelerator_file = os.path.join(self.DLIO_CONFIG_PATH, "accelerator", f"{accelerator_type}.yaml")
+            try:
+                accelerator_overrides = read_config_from_file(accelerator_file)
+                yaml_params = update_nested_dict(yaml_params, accelerator_overrides)
+                # Flatten accelerator overrides for Hydra (but keep separate from user params)
+                accelerator_overrides_dict = self._flatten_dict_for_hydra(accelerator_overrides)
+            except FileNotFoundError:
+                self.logger.warning(f"Accelerator config file not found: {accelerator_file}. Proceeding without accelerator-specific overrides.")
+        
+        # Store accelerator overrides separately so they can be passed to Hydra but not exposed in generated commands
+        self.accelerator_overrides_dict = accelerator_overrides_dict
+        
+        # Merge with command-line params (user params only, accelerator overrides handled separately)
         combined_params = update_nested_dict(yaml_params, create_nested_dict(params_dict))
 
         self.logger.debug(f'yaml params: \n{pprint.pformat(yaml_params)}')
@@ -69,6 +90,17 @@ class DLIOBenchmark(Benchmark, abc.ABC):
         self.logger.debug(f'Instance params: \n{pprint.pformat(self.__dict__)}')
 
         return params_dict, yaml_params, combined_params
+    
+    def _flatten_dict_for_hydra(self, nested_dict, parent_key='', separator='.'):
+        """Flatten a nested dictionary for Hydra command-line overrides."""
+        items = []
+        for key, value in nested_dict.items():
+            new_key = f"{parent_key}{separator}{key}" if parent_key else key
+            if isinstance(value, dict):
+                items.extend(self._flatten_dict_for_hydra(value, new_key, separator).items())
+            else:
+                items.append((new_key, value))
+        return dict(items)
 
     @abc.abstractmethod
     def _run(self):
@@ -103,6 +135,12 @@ class DLIOBenchmark(Benchmark, abc.ABC):
 
         cmd = self.add_workflow_to_cmd(cmd)
 
+        # Add accelerator overrides first (hidden from users, loaded automatically)
+        if hasattr(self, 'accelerator_overrides_dict') and self.accelerator_overrides_dict:
+            for key, value in self.accelerator_overrides_dict.items():
+                cmd += f" ++workload.{key}={value}"
+
+        # Add user-provided params
         if self.params_dict:
             for key, value in self.params_dict.items():
                 cmd += f" ++workload.{key}={value}"
@@ -134,12 +172,19 @@ class TrainingBenchmark(DLIOBenchmark):
             run=self.execute_command,
             configview=self.execute_command,
             reportgen=self.execute_command)
-        config_suffix = "datagen" if args.command == "datagen" else args.accelerator_type
         under_model = args.model.replace("-", "_")
-        self.config_file = f"{under_model}_{config_suffix}.yaml"
-        self.config_name = f"{under_model}_{config_suffix}"
+        if args.command == "datagen":
+            self.config_file = f"{under_model}_datagen.yaml"
+            self.config_name = f"{under_model}_datagen"
+            accelerator_type = None  # No accelerator for datagen
+        else:
+            self.config_file = f"{under_model}.yaml"  # No accelerator suffix
+            self.config_name = under_model
+            accelerator_type = args.accelerator_type
 
-        self.params_dict, self.yaml_params, self.combined_params = self.process_dlio_params(self.config_file)
+        self.params_dict, self.yaml_params, self.combined_params = self.process_dlio_params(
+            self.config_file, accelerator_type=accelerator_type
+        )
 
         if self.args.command not in ("datagen", "datasize"):
             self.verify_benchmark()
